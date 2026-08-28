@@ -11,6 +11,8 @@ system_prompt.txt        系统提示词，UTF-8 编码
 user_prompt.txt          用户提示词，UTF-8 编码
 logs\                    按日期保存的运行日志，自动清理过期文件
 failed_translations.jsonl 翻译失败记录，首次失败时自动生成
+glossary.json             全局术语表，自动生成，仅保留在本机
+glossary_additions.jsonl  自动收录人名的来源记录，仅保留在本机
 ```
 
 ## 首次配置
@@ -52,6 +54,10 @@ API Key 不要写入 `start-proxy.cmd`，也不要上传到网盘、Git 仓库�
 | `LOG_LEVEL` | `INFO` | 可选 `DEBUG`、`INFO`、`WARNING`、`ERROR`。 |
 | `LOG_TEXT` | `False` | 改为 `True` 才会把原文和译文写入普通运行日志。 |
 | `LOG_RETENTION_DAYS` | `2` | 每次启动时清理早于该天数的 `proxy-*.log`。 |
+| `GLOSSARY_FILE` | `glossary.json` | 全局人名术语表的本机 JSON 文件路径。 |
+| `AUTO_ADD_CHARACTER_NAMES` | `True` | 是否自动收录高置信度角色名。 |
+| `NAME_CONFIDENCE_THRESHOLD` | `0.9` | 自动收录的最低模型置信度。 |
+| `MAX_NEW_CHARACTER_NAMES` | `3` | 每条原文最多自动收录的人名数量。 |
 
 ## 提示词文件
 
@@ -64,6 +70,21 @@ API Key 不要写入 `start-proxy.cmd`，也不要上传到网盘、Git 仓库�
 3. 语言信息与当前待翻译原文，作为另一条 user message。
 
 不需要在提示词里放 `{text}` 等占位符。
+
+## 全局人名术语表
+
+转发器使用全局 `glossary.json` 保存已确认的人名映射。首次使用可复制 `glossary.example.json` 并改名为 `glossary.json`，或等待转发器自动收录：
+
+```json
+{
+  "さら": "莎拉",
+  "みく": "美玖"
+}
+```
+
+翻译前，转发器会在本地以最长匹配找出当前句中已有的人名，并遮罩为 `__XU_NAME_数字__`。模型只处理余下文本，返回结果后才恢复为固定中文名；因此不会把整个术语表发送给 API，也不会让不同游戏的无关人名增加 token 消耗。
+
+模型对未遮罩文本返回高置信度角色名候选时，转发器会自动追加到 `glossary.json`，并将来源句、置信度和时间写入 `glossary_additions.jsonl`。两者都是本机运行数据，已由 `.gitignore` 排除，不会被意外推送到公开仓库。
 
 ## 配置 XUnity Auto Translator
 

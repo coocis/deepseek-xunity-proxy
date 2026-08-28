@@ -8,6 +8,8 @@ venv/
 # Runtime data
 logs/
 failed_translations.jsonl
+glossary.json
+glossary_additions.jsonl
 
 # Local secrets and editor metadata
 .env

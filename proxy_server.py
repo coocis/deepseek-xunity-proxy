@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -21,6 +22,10 @@ from urllib.request import Request, urlopen
 APP_DIR = Path(__file__).resolve().parent
 LOG_DIR = APP_DIR / "logs"
 FAILED_TRANSLATIONS_FILE = APP_DIR / "failed_translations.jsonl"
+DEFAULT_GLOSSARY_FILE = APP_DIR / "glossary.json"
+GLOSSARY_ADDITIONS_FILE = APP_DIR / "glossary_additions.jsonl"
+PLACEHOLDER_PATTERN = re.compile(r"__XU_NAME_(\d+)__")
+NAME_ALLOWED_PATTERN = re.compile(r"^[\u3040-\u30ff\u3400-\u9fff々〆ヶー]{1,12}$")
 
 
 class ConfigurationError(ValueError):
@@ -42,6 +47,10 @@ class Settings:
     log_level: str
     log_text: bool
     log_retention_days: int
+    glossary_file: Path
+    auto_add_character_names: bool
+    name_confidence_threshold: float
+    max_new_character_names: int
     system_prompt: str
     user_prompt: str
 
@@ -57,6 +66,96 @@ class TokenUsage:
 class TranslationResult:
     text: str
     usage: TokenUsage | None
+    new_character_names: tuple["CharacterName", ...]
+
+
+@dataclass(frozen=True)
+class CharacterName:
+    source: str
+    translation: str
+    confidence: float
+
+
+class Glossary:
+    """全局人名词典：本地遮罩，避免将整张表发送给模型。"""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._entries = self._load()
+
+    def _load(self) -> dict[str, str]:
+        if not self._path.exists():
+            return {}
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ConfigurationError(f"无法读取术语表：{self._path} ({error})") from error
+        if not isinstance(data, dict) or not all(
+            isinstance(source, str) and isinstance(translation, str)
+            for source, translation in data.items()
+        ):
+            raise ConfigurationError("术语表必须是原文到译文的 JSON 对象。")
+        return {source: translation for source, translation in data.items() if source and translation}
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def mask_known_names(self, text: str) -> tuple[str, dict[str, str]]:
+        with self._lock:
+            entries = sorted(self._entries.items(), key=lambda item: len(item[0]), reverse=True)
+        placeholders: dict[str, str] = {}
+        masked = text
+        for source, translation in entries:
+            if source not in masked:
+                continue
+            placeholder = f"__XU_NAME_{len(placeholders)}__"
+            masked = masked.replace(source, placeholder)
+            placeholders[placeholder] = translation
+        return masked, placeholders
+
+    def restore_names(self, text: str, placeholders: dict[str, str]) -> str:
+        missing = [placeholder for placeholder in placeholders if placeholder not in text]
+        if missing:
+            raise ValueError("模型未完整保留已遮罩的人名占位符。")
+        for placeholder, translation in placeholders.items():
+            text = text.replace(placeholder, translation)
+        return text
+
+    def add_automatic(self, candidates: tuple[CharacterName, ...], source_text: str, settings: Settings) -> list[CharacterName]:
+        if not settings.auto_add_character_names:
+            return []
+        added: list[CharacterName] = []
+        with self._lock:
+            for candidate in candidates[: settings.max_new_character_names]:
+                if not is_automatic_name_candidate(candidate, source_text, self._entries, settings):
+                    continue
+                self._entries[candidate.source] = candidate.translation
+                added.append(candidate)
+            if added:
+                self._write_entries()
+        for candidate in added:
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": candidate.source,
+                "translation": candidate.translation,
+                "confidence": candidate.confidence,
+                "source_text": source_text,
+            }
+            with GLOSSARY_ADDITIONS_FILE.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return added
+
+    def _write_entries(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(dict(sorted(self._entries.items())), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._path)
 
 
 class SessionUsage:
@@ -143,6 +242,10 @@ def load_settings() -> Settings:
         log_level=log_level,
         log_text=env_bool("LOG_TEXT", False),
         log_retention_days=env_int("LOG_RETENTION_DAYS", 2, 0),
+        glossary_file=Path(env_text("GLOSSARY_FILE", str(DEFAULT_GLOSSARY_FILE))).resolve(),
+        auto_add_character_names=env_bool("AUTO_ADD_CHARACTER_NAMES", True),
+        name_confidence_threshold=env_float("NAME_CONFIDENCE_THRESHOLD", 0.9, 0.0),
+        max_new_character_names=env_int("MAX_NEW_CHARACTER_NAMES", 3, 0),
         system_prompt=read_prompt("system_prompt.txt"),
         user_prompt=read_prompt("user_prompt.txt"),
     )
@@ -203,6 +306,39 @@ def read_token_usage(payload: dict[str, Any]) -> TokenUsage | None:
     return TokenUsage(prompt_tokens, completion_tokens, total_tokens)
 
 
+def parse_character_names(value: Any) -> tuple[CharacterName, ...]:
+    if not isinstance(value, list):
+        return ()
+    names: list[CharacterName] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        translation = item.get("translation")
+        confidence = item.get("confidence")
+        if not isinstance(source, str) or not isinstance(translation, str):
+            continue
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            continue
+        names.append(CharacterName(source.strip(), translation.strip(), confidence_value))
+    return tuple(names)
+
+
+def is_automatic_name_candidate(
+    candidate: CharacterName, source_text: str, entries: dict[str, str], settings: Settings
+) -> bool:
+    return (
+        candidate.confidence >= settings.name_confidence_threshold
+        and candidate.source not in entries
+        and candidate.source in source_text
+        and bool(NAME_ALLOWED_PATTERN.fullmatch(candidate.source))
+        and bool(candidate.translation)
+        and not PLACEHOLDER_PATTERN.search(candidate.translation)
+    )
+
+
 def extract_translation(payload: dict[str, Any]) -> TranslationResult:
     try:
         result = payload["choices"][0]["message"]["content"]
@@ -210,13 +346,30 @@ def extract_translation(payload: dict[str, Any]) -> TranslationResult:
         raise ValueError("DeepSeek 响应中没有可用译文。") from error
     if not isinstance(result, str) or not result.strip():
         raise ValueError("DeepSeek 返回了空译文。")
-    return TranslationResult(text=result.strip(), usage=read_token_usage(payload))
+    try:
+        structured_result = json.loads(result)
+    except json.JSONDecodeError as error:
+        raise ValueError("DeepSeek 未按要求返回 JSON 翻译结果。") from error
+    if not isinstance(structured_result, dict):
+        raise ValueError("DeepSeek 返回的 JSON 翻译结果不是对象。")
+    translation = structured_result.get("translation")
+    if not isinstance(translation, str) or not translation.strip():
+        raise ValueError("DeepSeek 返回的 JSON 中没有有效译文。")
+    return TranslationResult(
+        text=translation.strip(),
+        usage=read_token_usage(payload),
+        new_character_names=parse_character_names(structured_result.get("new_character_names")),
+    )
 
 
-def translate(settings: Settings, source: str, source_lang: str, target_lang: str) -> TranslationResult:
+def translate(
+    settings: Settings, source: str, source_lang: str, target_lang: str, glossary: Glossary
+) -> TranslationResult:
     api_key = os.environ.get(settings.api_key_env, "").strip()
     if not api_key:
         raise RuntimeError(f"未找到 API Key 环境变量：{settings.api_key_env}")
+
+    masked_source, placeholders = glossary.mask_known_names(source)
 
     messages = [
         {"role": "system", "content": settings.system_prompt},
@@ -225,8 +378,8 @@ def translate(settings: Settings, source: str, source_lang: str, target_lang: st
             "role": "user",
             "content": (
                 f"源语言：{source_lang}\n目标语言：{target_lang}\n"
-                "以下是待翻译文本。只输出译文：\n"
-                f"{source}"
+                "以下是待翻译文本。请按 system message 中规定的 JSON 格式输出：\n"
+                f"{masked_source}"
             ),
         },
     ]
@@ -238,6 +391,7 @@ def translate(settings: Settings, source: str, source_lang: str, target_lang: st
             "max_tokens": settings.max_output_tokens,
             "stream": False,
             "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -257,7 +411,12 @@ def translate(settings: Settings, source: str, source_lang: str, target_lang: st
         try:
             with urlopen(request, timeout=settings.timeout_seconds) as response:
                 response_body = response.read().decode("utf-8")
-            return extract_translation(json.loads(response_body))
+            result = extract_translation(json.loads(response_body))
+            return TranslationResult(
+                text=glossary.restore_names(result.text, placeholders),
+                usage=result.usage,
+                new_character_names=result.new_character_names,
+            )
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
             last_error = error
             if attempt < settings.max_retries:
@@ -267,7 +426,7 @@ def translate(settings: Settings, source: str, source_lang: str, target_lang: st
 
 
 def make_handler(
-    settings: Settings, logger: logging.Logger, session_usage: SessionUsage
+    settings: Settings, logger: logging.Logger, session_usage: SessionUsage, glossary: Glossary
 ) -> type[BaseHTTPRequestHandler]:
     class TranslationHandler(BaseHTTPRequestHandler):
         server_version = "DeepSeekXUnityProxy/1.0"
@@ -305,7 +464,7 @@ def make_handler(
                 return
 
             try:
-                result = translate(settings, source, source_lang, target_lang)
+                result = translate(settings, source, source_lang, target_lang, glossary)
             except Exception as error:  # 必须以非 2xx 响应让 XUnity 不缓存失败结果。
                 reason = f"{type(error).__name__}: {error}"
                 try:
@@ -320,6 +479,16 @@ def make_handler(
                 logger.info("翻译成功：%r -> %r", source, result.text)
             else:
                 logger.info("翻译成功：%s 字符", len(source))
+            try:
+                added_names = glossary.add_automatic(result.new_character_names, source, settings)
+            except OSError as error:
+                logger.error("自动写入术语表失败：%s", error)
+                added_names = []
+            if added_names:
+                logger.info(
+                    "已自动收录人名：%s",
+                    "；".join(f"{item.source}={item.translation}" for item in added_names),
+                )
             if result.usage is None:
                 logger.warning("DeepSeek 响应未提供 token 用量，无法计入本次启动累计。")
             else:
@@ -341,6 +510,7 @@ def make_handler(
 def main() -> int:
     try:
         settings = load_settings()
+        glossary = Glossary(settings.glossary_file)
     except ConfigurationError as error:
         print(f"配置错误：{error}", file=sys.stderr)
         return 2
@@ -348,10 +518,11 @@ def main() -> int:
     logger = configure_logging(settings)
     logger.info("启动 DeepSeek XUnity 转发器；模型=%s，监听 http://%s:%s", settings.model, settings.bind_host, settings.port)
     logger.info("提示词从 system_prompt.txt 与 user_prompt.txt 读取；旧日志保留 %s 天", settings.log_retention_days)
+    logger.info("全局术语表=%s（当前 %s 条，自动收录=%s）", settings.glossary_file, glossary.count, settings.auto_add_character_names)
 
     try:
         server = ThreadingHTTPServer(
-            (settings.bind_host, settings.port), make_handler(settings, logger, SessionUsage())
+            (settings.bind_host, settings.port), make_handler(settings, logger, SessionUsage(), glossary)
         )
     except OSError as error:
         logger.error("无法监听端口：%s", error)

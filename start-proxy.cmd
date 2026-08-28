@@ -16,6 +16,10 @@ set "MAX_RETRIES=1"
 set "LOG_LEVEL=INFO"
 set "LOG_TEXT=False"
 set "LOG_RETENTION_DAYS=2"
+set "GLOSSARY_FILE=%~dp0glossary.json"
+set "AUTO_ADD_CHARACTER_NAMES=True"
+set "NAME_CONFIDENCE_THRESHOLD=0.9"
+set "MAX_NEW_CHARACTER_NAMES=3"
 
 rem Make Python and child processes use UTF-8.
 set "PYTHONUTF8=1"
