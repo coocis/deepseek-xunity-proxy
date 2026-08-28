@@ -1,0 +1,17 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Runtime data
+logs/
+failed_translations.jsonl
+
+# Local secrets and editor metadata
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
