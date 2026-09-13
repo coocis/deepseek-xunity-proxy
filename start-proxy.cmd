@@ -6,7 +6,7 @@ rem ===== XUnity + DeepSeek proxy settings =====
 set "BIND_HOST=127.0.0.1"
 set "PROXY_PORT=8765"
 set "DEEPSEEK_BASE_URL=https://api.deepseek.com"
-set "DEEPSEEK_MODEL=deepseek-v4-flash"
+set "DEEPSEEK_MODEL=deepseek-flash"
 set "DEEPSEEK_API_KEY_ENV=DEEPSEEK_API_KEY"
 set "REQUEST_TIMEOUT_SECONDS=60"
 set "MAX_INPUT_CHARS=200"

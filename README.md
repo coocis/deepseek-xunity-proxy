@@ -44,7 +44,7 @@ API Key 不要写入 `start-proxy.cmd`，也不要上传到网盘、Git 仓库�
 | `BIND_HOST` | `127.0.0.1` | 固定为本机地址，不建议改为局域网地址。 |
 | `PROXY_PORT` | `8765` | 转发器端口。 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek 的 API 基础地址。 |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 使用的模型名。 |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | 使用的模型名。 |
 | `DEEPSEEK_API_KEY_ENV` | `DEEPSEEK_API_KEY` | 保存实际 API Key 的环境变量名。 |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | 单次 DeepSeek 请求的超时秒数。 |
 | `MAX_INPUT_CHARS` | `200` | 接受的单条原文最大字符数；应与 XUnity 配置保持一致。 |

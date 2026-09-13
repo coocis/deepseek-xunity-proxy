@@ -232,7 +232,7 @@ def load_settings() -> Settings:
         bind_host=env_text("BIND_HOST", "127.0.0.1"),
         port=env_int("PROXY_PORT", 8765, 1),
         base_url=env_text("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-        model=env_text("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        model=env_text("DEEPSEEK_MODEL", "deepseek-flash"),
         api_key_env=env_text("DEEPSEEK_API_KEY_ENV", "DEEPSEEK_API_KEY"),
         timeout_seconds=env_float("REQUEST_TIMEOUT_SECONDS", 60.0, 1.0),
         max_input_chars=env_int("MAX_INPUT_CHARS", 200, 1),
